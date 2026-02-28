@@ -1,228 +1,100 @@
 ---
 name: codex-review-cc
-description: "Battle-tested code review skill using OpenAI Codex CLI. Includes CLI pitfall avoidance, network fallback, and actionable output interpretation. Triggers: code review, review, codex review, 代码审核, 代码审查, 检查代码"
+description: "Run code review using OpenAI Codex CLI to get a second-opinion from a different AI model. Use this skill whenever the user asks for code review, codex review, 代码审核, 代码审查, 检查代码, review, 审一下, or 看看代码. This skill delegates the actual review to the `codex` CLI tool — do NOT review the code yourself."
 ---
 
-# Codex Code Review Skill (CC Edition)
+# Codex Code Review Skill
 
-> Battle-tested edition with CLI pitfall avoidance, network fallback strategy, and real-world case patterns.
-
-## Trigger Conditions
-
-Triggered when user input contains:
-
-- "代码审核", "代码审查", "审查代码", "审核代码"
-- "review", "code review", "codex review", "codex 审核"
-- "帮我审核", "检查代码", "审一下", "看看代码"
-
-## Core Concept: Intention vs Implementation
-
-`codex review --uncommitted` only shows AI "what was done (Implementation)".
-Recording intention via CHANGELOG tells AI "what you wanted to do (Intention)".
-
-**"Code changes + intention description" → most effective AI code review input.**
-
----
-
-## CLI Pitfall Guide (Must Read)
-
-These are real pitfalls encountered in production use:
-
-| Trap | Wrong | Correct |
-|------|-------|---------|
-| `-p` flag | `codex -p "review"` (`-p` = `--profile`, NOT prompt) | `codex review --uncommitted` |
-| Non-interactive exec | `codex "prompt"` (opens interactive) | `codex exec --full-auto "prompt"` |
-| Redundant exec | `codex exec review --uncommitted` | `codex review --uncommitted` (review is already a subcommand) |
-
-**Key rule**: `codex review` is a direct subcommand — no need for `exec` wrapper.
-
----
-
-## Network Stability & Fallback
-
-Codex CLI can fail with `Transport error: network error` during long reviews. Once disconnected, retrying usually doesn't help.
-
-**Fallback strategy when codex fails:**
-
-```
-1. Attempt: codex review --uncommitted (with timeout)
-2. If timeout/network error → DO NOT retry endlessly
-3. Fallback: manually analyze diff in current context
-   - Run: git diff --stat && git diff
-   - Perform review inline (check for bugs, regressions, resource leaks)
-   - Report findings in same P1/P2 format
-```
-
-Always inform the user which path was taken.
-
----
+This skill delegates code review to the **Codex CLI** (`codex review`), which is powered by OpenAI's models. The whole point is to get a **second opinion from a different AI** — if you (Claude) review the code yourself, the user gets zero additional value. That's why the codex CLI call is the core action, not a nice-to-have.
 
 ## Execution Flow
 
-### Step 0: Check Working Directory
+### 1. Pre-flight checks
+
+Run these in parallel to assess the situation:
 
 ```bash
 git diff --name-only && git status --short
 ```
 
-- **Has uncommitted changes** → Continue steps 1-4
-- **Clean working directory** → `codex review --commit HEAD`
-
-### Step 1: Ensure CHANGELOG is Updated
-
-Check if CHANGELOG.md is in the diff:
-
-```bash
-git diff --name-only | grep -iE "changelog"
-```
-
-**If not updated, auto-generate:**
-
-1. Analyze: `git diff --stat` + `git diff`
-2. Generate entry under `## [Unreleased]` with `### Added / Changed / Fixed`
-3. Write to CHANGELOG.md
-4. Continue flow
-
-### Step 2: Stage Untracked Files
-
-Codex cannot review files not tracked by git. Stage new files:
-
-```bash
-# Check for untracked files
-git status --short | grep "^??"
-
-# Stage them safely (handles spaces/special chars)
-git ls-files --others --exclude-standard -z | while IFS= read -r -d '' f; do git add -- "$f"; done
-```
-
-### Step 3: Assess Difficulty & Run Review
-
-**Count changes:**
-
 ```bash
 git diff --stat | tail -1
-# e.g. "20 files changed, 342 insertions(+), 985 deletions(-)"
 ```
 
-**Difficulty rules (ANY triggers xhigh):**
+- If the working directory is clean (no changes), use `codex review --commit HEAD` instead of `--uncommitted`
+- If there are untracked files (`??` in status), stage them first — codex can't see untracked files:
+  ```bash
+  git ls-files --others --exclude-standard -z | while IFS= read -r -d '' f; do git add -- "$f"; done
+  ```
 
-- Files >= 10
-- Total changes (insertions + deletions) >= 500
-- Insertions alone >= 300 OR deletions alone >= 300
+### 2. Ensure CHANGELOG exists in the diff
 
-| Difficulty | Config | Timeout |
-|-----------|--------|---------|
-| Hard | `model_reasoning_effort=xhigh` | 30 min |
-| Normal | `model_reasoning_effort=high` | 10 min |
+Check: `git diff --name-only | grep -iE "changelog"`
 
-**Run codex review in isolated context:**
+If CHANGELOG is missing from the diff, generate one before running codex. Codex reviews better when it can compare "what was intended" (CHANGELOG) vs "what was done" (diff):
 
-For agents that support subagent/subtask isolation (e.g. Claude Code's Agent tool), run codex in a separate context to avoid polluting the main conversation. For agents without isolation support, run directly.
+1. Read `git diff --stat` and `git diff` to understand the changes
+2. Write an entry under `## [Unreleased]` with `### Added / Changed / Fixed`
+3. Save to CHANGELOG.md
 
-**Command templates by project type:**
+### 3. Run codex review (the core action)
+
+Pick the effort level based on diff size:
+
+| Condition (any one triggers "hard") | Effort |
+|-------------------------------------|--------|
+| Files >= 10, or total lines changed >= 500, or insertions >= 300 or deletions >= 300 | `model_reasoning_effort=xhigh` |
+| Otherwise | `model_reasoning_effort=high` |
+
+Run the codex CLI via Bash tool. Use a 10-minute timeout for normal reviews, 30-minute for hard ones:
 
 ```bash
-# Node/Bun project
-bun run lint:fix 2>/dev/null; codex review --uncommitted --config model_reasoning_effort=high
+codex review --uncommitted --config model_reasoning_effort=high
+```
 
-# Go project
-go fmt ./... && go vet ./... && codex review --uncommitted --config model_reasoning_effort=high
-
-# Python project
-ruff check --fix . && codex review --uncommitted --config model_reasoning_effort=high
-
-# Clean working directory
+For clean working directories:
+```bash
 codex review --commit HEAD --config model_reasoning_effort=high
 ```
 
-**Timeout & failure handling:**
+Optionally prepend a lint-fix step for the project's ecosystem (e.g. `bun run lint:fix 2>/dev/null;` for Node/Bun projects).
 
-```
-IF codex hangs or returns "Transport error: network error":
-  1. Wait up to 30 seconds for recovery
-  2. If no recovery → report the error message
-  3. DO NOT retry more than once
-  4. Trigger fallback: analyze diff manually (see Network Stability section)
-```
+**CLI pitfalls to avoid:**
+- `codex review` is a direct subcommand — do NOT wrap it in `codex exec`
+- `-p` means `--profile`, NOT prompt — never use `codex -p "review"`
+- The command runs non-interactively and prints its review to stdout
 
-### Step 4: Interpret Output & Act
+### 4. Interpret codex output and act
 
-**Priority levels:**
+Read codex's review output and categorize findings:
 
 | Level | Meaning | Action |
 |-------|---------|--------|
-| **P1** | Severe bugs, regressions, data loss risk | Fix immediately |
-| **P2** | Code quality, resource leaks, style | Evaluate — fix if reasonable, skip if debatable |
-| **P3** | Suggestions, nits | Optional |
+| **P1** | Bugs, regressions, data loss risk | Fix immediately |
+| **P2** | Code quality, resource leaks | Fix if reasonable, explain if skipping |
+| **P3** | Nits, style suggestions | Optional |
 
-**Do NOT blindly follow all suggestions.** Evaluate each:
-
-- Is this a real bug or a false positive?
+Evaluate each finding critically — codex can produce false positives. Check:
+- Is this a real bug or a misunderstanding of the codebase?
 - Does the suggested fix introduce new complexity?
-- Is this relevant to the current change scope?
+- Is it relevant to the scope of this change?
 
-**After fixing P1/P2 items:**
+After fixing P1/P2 items, run tests to confirm nothing broke.
 
-1. Re-run tests to confirm fixes don't break anything
-2. Optionally re-run codex for a second pass
+### 5. If codex fails: fallback to manual review
 
-### Step 5: Self-Correction
+Codex CLI sometimes fails with `Transport error: network error` or hangs. If the codex command fails or times out:
 
-If codex finds CHANGELOG inconsistent with code:
+1. Do NOT retry more than once
+2. Tell the user codex failed and you're falling back to manual review
+3. Read the diff yourself (`git diff --stat && git diff`) and perform the review inline
+4. Report findings in the same P1/P2/P3 format
 
-- **Code is wrong** → Fix code
-- **CHANGELOG is wrong** → Update CHANGELOG
+The user should always know which path was taken.
 
----
+## Patterns worth watching for
 
-## Real-World Case Patterns
+These recurring issues have been caught by codex in real reviews:
 
-These patterns were discovered through actual codex reviews and are worth watching for:
-
-### Pattern: Client Navigation State Regression
-
-**Scenario**: Using `router.push()` to navigate between pages, but component state doesn't reset because the framework reuses the component instance.
-
-**Codex signal**: P1 — "Navigation doesn't trigger state reset"
-
-**Fix pattern**: Use explicit state reset on navigation, or use a `key` prop to force remount.
-
-### Pattern: Per-Request Resource Creation
-
-**Scenario**: Creating HTTP clients/agents/connections inside request handlers instead of reusing a shared instance.
-
-**Codex signal**: P2 — "Resource created per-request, potential leak"
-
-**Fix pattern**: Create shared instance at module level, reuse across requests.
-
----
-
-## Codex CLI Reference
-
-### Basic Syntax
-
-```bash
-codex review [OPTIONS]
-```
-
-### Options
-
-| Option | Description |
-|--------|-------------|
-| `--uncommitted` | Review all uncommitted changes (staged + unstaged + untracked) |
-| `--base <BRANCH>` | Review changes relative to a base branch |
-| `--commit <SHA>` | Review a specific commit |
-| `--title <TITLE>` | Optional title for review summary |
-| `-c, --config <key=value>` | Override config (e.g., `model_reasoning_effort=xhigh`) |
-
-### Exec Mode (for non-review tasks)
-
-```bash
-codex exec --full-auto "your prompt here"
-```
-
-**Constraints:**
-
-- `--uncommitted`, `--base`, `--commit` are mutually exclusive
-- `[PROMPT]` is mutually exclusive with the above options
-- Must run inside a git repository
+- **Navigation state regression**: `router.push()` reuses component instances, state doesn't reset. Fix: explicit reset or `key` prop.
+- **Per-request resource creation**: HTTP clients/agents created inside handlers instead of shared. Fix: module-level singleton.
