@@ -1,17 +1,74 @@
 ---
 name: codex-review-cc
-description: "Run code review using OpenAI Codex CLI to get a second-opinion from a different AI model. Use this skill whenever the user asks for code review, codex review, 代码审核, 代码审查, 检查代码, review, 审一下, or 看看代码. This skill delegates the actual review to the `codex` CLI tool — do NOT review the code yourself."
+description: "Run code review or codebase analysis using OpenAI Codex CLI to get a second-opinion from a different AI model. Triggers: code review, review, codex review, 代码审核, 代码审查, 检查代码, 让 codex 看看, codex 分析"
 ---
 
-# Codex Code Review Skill
+# Codex Code Review Skill (CC Edition)
 
-This skill delegates code review to the **Codex CLI**, which is powered by OpenAI's models. The whole point is to get a **second opinion from a different AI** — if you (Claude) review the code yourself, the user gets zero additional value. That's why the codex CLI call is the core action, not a nice-to-have.
+> Battle-tested edition with CLI pitfall avoidance, network fallback strategy, and real-world case patterns.
 
-## Execution Flow
+This skill delegates analysis to the **Codex CLI**, which is powered by OpenAI's models. The whole point is to get a **second opinion from a different AI** — if you (Claude) do the analysis yourself, the user gets zero additional value.
 
-### 1. Pre-flight checks
+## Trigger Conditions
 
-Run these in parallel to assess the situation:
+Triggered when user input contains:
+
+- "代码审核", "代码审查", "审查代码", "审核代码"
+- "review", "code review", "codex review", "codex 审核"
+- "帮我审核", "检查代码", "审一下", "看看代码"
+- "让 codex 看看", "codex 分析", "codex 梳理"
+
+---
+
+## Two Modes: Change Review vs Focused Analysis
+
+This skill has two distinct modes. **Determine the mode FIRST before doing anything else.**
+
+| Mode | When to use | Pre-flight (git diff) needed? | Codex command |
+|------|-------------|-------------------------------|---------------|
+| **变更审查** (Change Review) | User wants to review uncommitted changes, a commit, or a PR | YES — need diff stats | `codex review --uncommitted` |
+| **定向审查** (Focused Analysis) | User wants codebase analysis with a specific angle (test quality, architecture, security, feature mapping, etc.) | NO — skip entirely | `codex exec --full-auto "prompt"` |
+
+### How to determine mode
+
+- If user's request is about **changes/diff** (e.g. "review 我的改动", "审一下代码", "看看有没有 bug") → **变更审查**
+- If user's request has a **specific analysis focus** unrelated to changes (e.g. "梳理核心功能", "review 测试代码找冗余", "分析架构", "看看安全性") → **定向审查**
+- If unclear, use AskUserQuestion:
+
+```
+AskUserQuestion:
+  question: "选择审查模式："
+  header: "Review mode"
+  options:
+    - label: "变更审查"
+      description: "审查当前未提交的代码变更，找 bug、回归、代码质量问题 (codex review)"
+    - label: "定向审查"
+      description: "针对特定角度分析代码库，比如测试质量、架构梳理、安全性 (codex exec)"
+```
+
+If the user's original request already clearly indicates one mode, **skip the question and go directly to the corresponding path.**
+
+---
+
+## CLI Pitfall Guide (Must Read)
+
+| Trap | Wrong | Correct |
+|------|-------|---------|
+| `-p` flag | `codex -p "review"` (`-p` = `--profile`, NOT prompt) | `codex review --uncommitted` |
+| Non-interactive exec | `codex "prompt"` (opens interactive) | `codex exec --full-auto "prompt"` |
+| Redundant exec | `codex exec review --uncommitted` | `codex review --uncommitted` (review is already a subcommand) |
+
+**Key rule**: `codex review` is a direct subcommand — no need for `exec` wrapper.
+
+---
+
+## Path A: 变更审查 (Change Review)
+
+For reviewing uncommitted changes, specific commits, or PRs.
+
+### A1. Pre-flight checks
+
+Run in parallel:
 
 ```bash
 git diff --name-only && git status --short
@@ -21,42 +78,36 @@ git diff --name-only && git status --short
 git diff --stat | tail -1
 ```
 
-- If there are untracked files (`??` in status), stage them first — codex can't see untracked files:
+- If there are untracked files (`??` in status), stage them first:
   ```bash
   git ls-files --others --exclude-standard -z | while IFS= read -r -d '' f; do git add -- "$f"; done
   ```
+- **Clean working directory** → use `codex review --commit HEAD` instead
 
-### 2. Choose review mode
+### A2. Ensure CHANGELOG
 
-After pre-flight checks, use AskUserQuestion to let the user pick the review mode. Present the diff summary (file count, lines changed) so they have context:
+Check if CHANGELOG.md is in the diff:
 
-```
-AskUserQuestion:
-  question: "检测到 {N} 个文件变更，{insertions}+ {deletions}-。选择审查模式："
-  header: "Review mode"
-  options:
-    - label: "通用审查"
-      description: "审查所有变更，找 bug、回归、代码质量问题 (codex review --uncommitted)"
-    - label: "定向审查"
-      description: "针对特定角度审查，比如测试质量、安全性、性能 (codex exec)"
+```bash
+git diff --name-only | grep -iE "changelog"
 ```
 
-- User picks **通用审查** → Go to **Step 3a**
-- User picks **定向审查** → ask a follow-up question for specifics if the user's original request doesn't already contain a clear focus, then go to **Step 3b**
-- User picks **Other** and types a custom response → interpret their response and route accordingly
+If not updated, auto-generate an entry under `## [Unreleased]` based on `git diff --stat`.
 
-If the user's original request already clearly specifies a focus (e.g. "review 测试代码找冗余"), you can skip the question and go directly to **Step 3b**.
+**"Code changes + intention description" → most effective AI code review input.**
 
-### 3a. Generic review (codex review)
+### A3. Assess difficulty & run
 
-For broad "just review everything" requests. Ensure CHANGELOG exists in the diff first (`git diff --name-only | grep -iE "changelog"`), generating one if missing — codex reviews better when it can compare intent vs implementation.
+**Difficulty rules (ANY triggers xhigh):**
 
-Pick the effort level based on diff size:
+- Files >= 10
+- Total changes (insertions + deletions) >= 500
+- Insertions alone >= 300 OR deletions alone >= 300
 
-| Condition (any one triggers xhigh) | Effort |
-|------------------------------------|--------|
-| Files >= 10, total lines >= 500, insertions >= 300, or deletions >= 300 | `model_reasoning_effort=xhigh` |
-| Otherwise | `model_reasoning_effort=high` |
+| Difficulty | Config | Timeout |
+|-----------|--------|---------|
+| Hard | `model_reasoning_effort=xhigh` | 30 min |
+| Normal | `model_reasoning_effort=high` | 10 min |
 
 ```bash
 codex review --uncommitted --config model_reasoning_effort=high
@@ -64,58 +115,78 @@ codex review --uncommitted --config model_reasoning_effort=high
 
 For clean working directories: `codex review --commit HEAD --config ...`
 
-Use 10-minute timeout for normal, 30-minute for xhigh.
+---
 
-### 3b. Focused review (codex exec)
+## Path B: 定向审查 (Focused Analysis)
 
-For requests with a specific review angle. Compose a prompt and run it through `codex exec --full-auto`.
+For codebase analysis with a specific focus. **NO pre-flight checks needed** — go directly to composing and running the prompt.
 
-**Compose the prompt** from three parts:
+### B1. Compose prompt
 
-1. **Objective** — what the user wants reviewed, in their words
-2. **Scope** — which files to focus on (derive from user's request; e.g. "test code" → `*.test.ts` files)
-3. **Output format** — always ask for P1/P2/P3 structured findings
+Build the prompt from three parts:
 
-**Prompt template:**
+1. **Objective** — what the user wants analyzed, in their words
+2. **Scope** — which files to focus on (derive from user's request)
+3. **Output format** — structured findings (P1/P2/P3 for reviews, or custom structure for analysis)
+
+**Prompt template for code quality review:**
 
 ```
 Review the codebase with this specific focus:
 
-OBJECTIVE: {user's concern, e.g. "Find redundant tests, fake tests that don't actually verify anything meaningful, and tests that would pass even if the implementation was broken"}
-
-SCOPE: {file pattern, e.g. "All test files (*.test.ts, *.test.tsx)"}
+OBJECTIVE: {user's concern}
+SCOPE: {file pattern}
 
 INSTRUCTIONS:
-- Read the relevant source files to understand what the tests SHOULD be verifying
-- Then read each test file and evaluate whether each test case actually tests something real
-- Consider: does this test add confidence? Would it catch a real regression? Or is it just going through the motions?
+- Read the relevant source files to understand the implementation
+- Evaluate against the objective
+- Be thorough and specific
 
 Report findings as:
-- P1 (Critical): Tests that are actively misleading (appear to test something but don't)
-- P2 (Important): Redundant tests, tests that overlap significantly, low-value assertions
-- P3 (Minor): Style improvements, better test organization
+- P1 (Critical): ...
+- P2 (Important): ...
+- P3 (Minor): ...
 
-For each finding: file path, test name, what's wrong, and suggested fix.
+For each finding: file path, what's wrong, and suggested fix.
 ```
 
-Adapt the template to fit the user's actual concern — the example above is for test quality review. For a security review, the instructions and priority definitions would be different.
+**Prompt template for architecture/feature analysis:**
 
-**Run it:**
+```
+Analyze the codebase with this focus:
+
+OBJECTIVE: {user's concern, e.g. "Map out all core features and end-to-end user flows"}
+SCOPE: {key files to read}
+
+INSTRUCTIONS:
+- Read each file listed in scope
+- {specific analysis instructions}
+
+Output in {language}. Use structured format with clear headings.
+```
+
+Adapt the template to fit the user's actual request.
+
+### B2. Choose effort level
+
+For focused analysis, effort level is based on **scope size** (not diff size):
+
+| Scope | Effort | Timeout |
+|-------|--------|---------|
+| > 10 files or complex multi-file analysis | `model_reasoning_effort=xhigh` | 30 min |
+| <= 10 files or focused single-aspect review | `model_reasoning_effort=high` | 10 min |
+
+### B3. Run
 
 ```bash
 codex exec --full-auto "YOUR_COMPOSED_PROMPT" --config model_reasoning_effort=high
 ```
 
-Same effort/timeout rules as 3a. Use a 10-minute timeout for normal, 30-minute for xhigh.
+---
 
-**CLI pitfalls:**
-- `codex review` is a subcommand for generic diff review — do NOT wrap it in `exec`
-- `codex exec --full-auto "prompt"` is for custom prompts — this is the focused mode
-- `-p` means `--profile`, NOT prompt — never use `codex -p`
+## Interpret Output & Act
 
-### 4. Interpret codex output and act
-
-Read codex's output and categorize findings:
+**Priority levels (for review-type output):**
 
 | Level | Meaning | Action |
 |-------|---------|--------|
@@ -123,20 +194,75 @@ Read codex's output and categorize findings:
 | **P2** | Quality issues, redundancy, resource leaks | Fix if reasonable, explain if skipping |
 | **P3** | Nits, style | Optional |
 
-Evaluate each finding critically — codex can produce false positives. Check:
-- Is this a real issue or a misunderstanding of the codebase?
+**Do NOT blindly follow all suggestions.** Evaluate each:
+
+- Is this a real bug or a false positive?
 - Does the suggested fix introduce new complexity?
-- Is it relevant to the scope of the review?
+- Is this relevant to the current scope?
 
-After fixing P1/P2 items, run tests to confirm nothing broke.
+**After fixing P1/P2 items:** re-run tests to confirm fixes don't break anything.
 
-### 5. If codex fails: fallback to manual review
+---
 
-Codex CLI sometimes fails with `Transport error: network error` or hangs. If the codex command fails or times out:
+## Network Stability & Fallback
 
-1. Do NOT retry more than once
-2. Tell the user codex failed and you're falling back to manual review
-3. Read the relevant files yourself and perform the review inline
-4. Report findings in the same P1/P2/P3 format
+Codex CLI can fail with `Transport error: network error` during long sessions.
 
-The user should always know which path was taken.
+```
+IF codex hangs or returns network error:
+  1. DO NOT retry more than once
+  2. Tell the user codex failed and you're falling back to manual analysis
+  3. Read the relevant files yourself and perform the analysis inline
+  4. Report findings in the same format
+```
+
+Always inform the user which path was taken.
+
+---
+
+## Real-World Case Patterns
+
+### Pattern: Client Navigation State Regression
+
+**Scenario**: Using `router.push()` to navigate, but component state doesn't reset because the framework reuses the component instance.
+
+**Codex signal**: P1 — "Navigation doesn't trigger state reset"
+
+**Fix**: Use explicit state reset on navigation, or `key` prop to force remount.
+
+### Pattern: Per-Request Resource Creation
+
+**Scenario**: Creating HTTP clients/agents/connections inside request handlers instead of reusing shared instances.
+
+**Codex signal**: P2 — "Resource created per-request, potential leak"
+
+**Fix**: Create shared instance at module level, reuse across requests.
+
+---
+
+## Codex CLI Reference
+
+### Review Mode
+
+```bash
+codex review [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--uncommitted` | Review all uncommitted changes |
+| `--base <BRANCH>` | Review changes relative to a base branch |
+| `--commit <SHA>` | Review a specific commit |
+| `--title <TITLE>` | Optional title for review summary |
+| `-c, --config <key=value>` | Override config (e.g., `model_reasoning_effort=xhigh`) |
+
+### Exec Mode (for focused analysis)
+
+```bash
+codex exec --full-auto "your prompt here" --config model_reasoning_effort=high
+```
+
+**Constraints:**
+
+- `--uncommitted`, `--base`, `--commit` are mutually exclusive
+- Must run inside a git repository
