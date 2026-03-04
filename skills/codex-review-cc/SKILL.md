@@ -1,6 +1,6 @@
 ---
 name: codex-review-cc
-description: "Run code review or codebase analysis using OpenAI Codex CLI to get a second-opinion from a different AI model. Triggers: code review, review, codex review, 代码审核, 代码审查, 检查代码, 让 codex 看看, codex 分析"
+description: "Run code review or codebase analysis using OpenAI Codex CLI to get a second-opinion from a different AI model. Use this skill whenever the user wants code reviewed, a second opinion on their changes, codebase analysis, or quality checks — even if they don't mention 'codex' explicitly. Triggers include: code review, review my code, 代码审核, 代码审查, 检查代码, 帮我看看代码, 让 codex 看看, codex 分析, second opinion, 有没有 bug, 看看有没有问题, review PR, review changes, 审查一下."
 ---
 
 # Codex Code Review Skill (CC Edition)
@@ -8,17 +8,6 @@ description: "Run code review or codebase analysis using OpenAI Codex CLI to get
 > Battle-tested edition with CLI pitfall avoidance, network fallback strategy, and real-world case patterns.
 
 This skill delegates analysis to the **Codex CLI**, which is powered by OpenAI's models. The whole point is to get a **second opinion from a different AI** — if you (Claude) do the analysis yourself, the user gets zero additional value.
-
-## Trigger Conditions
-
-Triggered when user input contains:
-
-- "代码审核", "代码审查", "审查代码", "审核代码"
-- "review", "code review", "codex review", "codex 审核"
-- "帮我审核", "检查代码", "审一下", "看看代码"
-- "让 codex 看看", "codex 分析", "codex 梳理"
-
----
 
 ## Two Modes: Change Review vs Focused Analysis
 
@@ -84,17 +73,15 @@ git diff --stat | tail -1
   ```
 - **Clean working directory** → use `codex review --commit HEAD` instead
 
-### A2. Ensure CHANGELOG
+### A2. Optionally update CHANGELOG
 
-Check if CHANGELOG.md is in the diff:
+If the project has a CHANGELOG.md **and** the user's changes are significant, check if it's already in the diff:
 
 ```bash
 git diff --name-only | grep -iE "changelog"
 ```
 
-If not updated, auto-generate an entry under `## [Unreleased]` based on `git diff --stat`.
-
-**"Code changes + intention description" → most effective AI code review input.**
+If not updated, suggest adding an entry under `## [Unreleased]`. Skip this step if the project doesn't use a CHANGELOG or the changes are minor.
 
 ### A3. Assess difficulty & run
 
@@ -217,26 +204,6 @@ IF codex hangs or returns network error:
 ```
 
 Always inform the user which path was taken.
-
----
-
-## Real-World Case Patterns
-
-### Pattern: Client Navigation State Regression
-
-**Scenario**: Using `router.push()` to navigate, but component state doesn't reset because the framework reuses the component instance.
-
-**Codex signal**: P1 — "Navigation doesn't trigger state reset"
-
-**Fix**: Use explicit state reset on navigation, or `key` prop to force remount.
-
-### Pattern: Per-Request Resource Creation
-
-**Scenario**: Creating HTTP clients/agents/connections inside request handlers instead of reusing shared instances.
-
-**Codex signal**: P2 — "Resource created per-request, potential leak"
-
-**Fix**: Create shared instance at module level, reuse across requests.
 
 ---
 
